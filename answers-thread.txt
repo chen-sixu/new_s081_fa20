@@ -1,0 +1,6 @@
+1.uthread:
+	在thread结构体中声明变量，以保存线程context
+	thread_switch():照抄swtch
+	thread_schedule():根据提示，调用thread_switch()
+	thread_create():ra改为指向func的入口地址
+					sp初始化在栈顶
