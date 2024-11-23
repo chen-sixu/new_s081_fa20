@@ -4,3 +4,10 @@
 	thread_schedule():根据提示，调用thread_switch()
 	thread_create():ra改为指向func的入口地址
 					sp初始化在栈顶
+
+2.ph
+	假设线程a和b同时进行put操作，他们的key映射到同一个桶中，也就是他们准备对同一个链表进行操作
+	线程a将该链表的表头结点table[i]设为自己的next，下一步应该将自己更新为table[i]
+	在更新之前，线程b也将自己的next设为原表头，此时新的表头应该为entry-a，但b以为是原表头
+	b将自己更新为table[i]，覆盖了进程a的操作，entry-a丢失
+	而以上过程可能交替发生，因此都会丢失
