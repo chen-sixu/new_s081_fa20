@@ -23,33 +23,55 @@
 #include "fs.h"
 #include "buf.h"
 
+#define NBUCKET 13
+#define NB 5
+
+extern uint ticks;
+
 struct {
   struct spinlock lock;
-  struct buf buf[NBUF];
+  struct buf buf[NB];
 
   // Linked list of all buffers, through prev/next.
   // Sorted by how recently the buffer was used.
   // head.next is most recent, head.prev is least.
-  struct buf head;
-} bcache;
+  // struct buf head;
+} bcache[NBUCKET];
+// 13个桶，每个桶有5个buf
+
+int
+hash(int n)
+{
+  return n % NBUCKET;
+}
 
 void
 binit(void)
 {
-  struct buf *b;
+  // struct buf *b;
+  char temp1[20];
+  for (int i = 0; i < NBUCKET; i++) {
+	snprintf(temp1, sizeof(temp1), "bcache_%d", i);
+    initlock(&bcache[i].lock, temp1);
+    char temp2[20];
+	for (int j = 0; j < NB; j++) {
+	  snprintf(temp2, sizeof(temp2), "sleeplock_%d", j);
+	  initsleeplock(&bcache[i].buf[j].lock, temp2);
+	}
+  }
+  
 
-  initlock(&bcache.lock, "bcache");
 
   // Create linked list of buffers
-  bcache.head.prev = &bcache.head;
-  bcache.head.next = &bcache.head;
-  for(b = bcache.buf; b < bcache.buf+NBUF; b++){
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    initsleeplock(&b->lock, "buffer");
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
-  }
+//   bcache.head.prev = &bcache.head;
+//   bcache.head.next = &bcache.head;
+//   for(b = bcache.buf; b < bcache.buf+NBUF; b++){
+//     b->next = bcache.head.next;
+//     b->prev = &bcache.head;
+//     initsleeplock(&b->lock, "buffer");
+//     bcache.head.next->prev = b;
+//     bcache.head.next = b;
+//   }
 }
 
 // Look through buffer cache for block on device dev.
@@ -59,14 +81,17 @@ static struct buf*
 bget(uint dev, uint blockno)
 {
   struct buf *b;
+  int hash_b = hash(blockno);
 
-  acquire(&bcache.lock);
+  acquire(&bcache[hash_b].lock);
 
   // Is the block already cached?
-  for(b = bcache.head.next; b != &bcache.head; b = b->next){
+  for(int i = 0; i < NB; i++){
+    b = &bcache[hash_b].buf[i];
     if(b->dev == dev && b->blockno == blockno){
       b->refcnt++;
-      release(&bcache.lock);
+      b->lastuse = ticks;
+      release(&bcache[hash_b].lock);
       acquiresleep(&b->lock);
       return b;
     }
@@ -74,17 +99,27 @@ bget(uint dev, uint blockno)
 
   // Not cached.
   // Recycle the least recently used (LRU) unused buffer.
-  for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
-    if(b->refcnt == 0) {
-      b->dev = dev;
-      b->blockno = blockno;
-      b->valid = 0;
-      b->refcnt = 1;
-      release(&bcache.lock);
-      acquiresleep(&b->lock);
-      return b;
+  struct buf temp_buf;
+  uint min = 0xffffffff;
+  int index = -1;
+  for(int j = 0; j<NB; j++){
+    temp_buf = bcache[hash_b].buf[j];
+    if(temp_buf.lastuse < min && temp_buf.refcnt == 0) { //当前这个temp是最近最少使用
+      min = temp_buf.lastuse;
+	  index = j;
     }
   }
+  if (index < 0)
+	panic("bget: no buffers");
+  b = &bcache[hash_b].buf[index];
+  b->dev = dev;
+  b->blockno = blockno;
+  b->valid = 0;
+  b->refcnt = 1;
+  release(&bcache[hash_b].lock);
+  acquiresleep(&b->lock);
+  return b;
+  
   panic("bget: no buffers");
 }
 
@@ -116,38 +151,36 @@ bwrite(struct buf *b)
 void
 brelse(struct buf *b)
 {
+  int hash_b = hash(b->blockno);
+
   if(!holdingsleep(&b->lock))
     panic("brelse");
 
   releasesleep(&b->lock);
 
-  acquire(&bcache.lock);
+  acquire(&bcache[hash_b].lock);
   b->refcnt--;
-  if (b->refcnt == 0) {
-    // no one is waiting for it.
-    b->next->prev = b->prev;
-    b->prev->next = b->next;
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
-  }
-  
-  release(&bcache.lock);
+  b->lastuse = ticks;
+  release(&bcache[hash_b].lock);
 }
 
 void
 bpin(struct buf *b) {
-  acquire(&bcache.lock);
+  int hash_b = hash(b->blockno);
+  acquire(&bcache[hash_b].lock);
   b->refcnt++;
-  release(&bcache.lock);
+  release(&bcache[hash_b].lock);
 }
 
 void
 bunpin(struct buf *b) {
-  acquire(&bcache.lock);
+  int hash_b = hash(b->blockno);
+  acquire(&bcache[hash_b].lock);
   b->refcnt--;
-  release(&bcache.lock);
+  release(&bcache[hash_b].lock);
 }
 
 
+/*
+上一个是给每个cpu单独分配freelist，但这里不应该这样做，缓冲块应该是对所有cpu都可用的
+*/
